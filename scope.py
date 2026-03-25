@@ -128,7 +128,7 @@ class ScopeConnection:
 
 
 class CaptureWorker(QObject):
-    trace_ready = pyqtSignal(object)
+    trace_ready = pyqtSignal(object, object)  # (trace_data, status_dict)
     error_occurred = pyqtSignal(str)
     capture_status = pyqtSignal(str)
 
@@ -172,7 +172,8 @@ class CaptureWorker(QObject):
                     self.capture_status.emit("Captured")
                     
                 if data is not None:
-                    self.trace_ready.emit(data)
+                    status = self._scope.read_status()
+                    self.trace_ready.emit(data, status)
                     
             except Exception as e:
                 self.error_occurred.emit(str(e))
@@ -286,7 +287,7 @@ class ControlPanel(QWidget):
         self.presamples_spin.valueChanged.connect(lambda v: self.setting_changed.emit("adc.presamples", v))
         
         self.decimate_spin = QSpinBox()
-        self.decimate_spin.setRange(1, 65535)
+        self.decimate_spin.setRange(0, 65535)
         self.decimate_spin.valueChanged.connect(lambda v: self.setting_changed.emit("adc.decimate", v))
         
         l.addRow("Samples", self.samples_spin)
@@ -421,21 +422,6 @@ class ControlPanel(QWidget):
             self.lbl_freq.setText("Freq: -")
 
 
-class ConnectWorker(QThread):
-    result = pyqtSignal(object, object)
-    
-    def __init__(self, scope_connection):
-        super().__init__()
-        self.scope_connection = scope_connection
-        
-    def run(self):
-        try:
-            device_type = self.scope_connection.connect()
-            self.scope_connection.default_setup()
-            self.result.emit(device_type, None)
-        except Exception as e:
-            self.result.emit(None, str(e))
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -542,7 +528,6 @@ class MainWindow(QMainWindow):
         
     def on_stop_capture(self):
         self.capture_worker._running = False
-        self.capture_thread.quit()
         self.capture_thread.wait()
 
     def on_single_capture(self):
@@ -613,10 +598,10 @@ class MainWindow(QMainWindow):
             
         safe_set_spin(cp.timeout_spin, sc.read_setting("adc.timeout"))
 
-    def on_trace_ready(self, data):
+    def on_trace_ready(self, data, status):
         self.waveform_plot.update_trace(data)
-        self.update_measurements(data)
-        self.update_status()
+        self.control_panel.update_status(status)
+        self.update_measurements(data, status)
 
     def on_error(self, err_msg):
         self.status_bar.showMessage(f"Error: {err_msg}")
@@ -626,12 +611,13 @@ class MainWindow(QMainWindow):
         stats = self.scope_connection.read_status()
         self.control_panel.update_status(stats)
 
-    def update_measurements(self, data):
+    def update_measurements(self, data, status=None):
         if data is None or len(data) == 0:
             return
 
-        stats = self.scope_connection.read_status()
-        sample_rate = stats.get("adc_rate", 1.0) or 1.0
+        if status is None:
+            status = self.scope_connection.read_status()
+        sample_rate = status.get("adc_rate", 1.0) or 1.0
         
         vmin = float(np.min(data))
         vmax = float(np.max(data))

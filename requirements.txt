@@ -1,0 +1,5 @@
+chipwhisperer @ git+https://github.com/newaetech/chipwhisperer.git
+PyQt6
+pyqtgraph
+numpy
+jupyter_bokeh

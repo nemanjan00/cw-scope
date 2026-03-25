@@ -470,6 +470,7 @@ class ControlPanel(QWidget):
     connect_clicked = pyqtSignal()
     disconnect_clicked = pyqtSignal()
     default_setup_clicked = pyqtSignal()
+    auto_setup_clicked = pyqtSignal()
     cursors_toggled = pyqtSignal(bool)
     fft_toggled = pyqtSignal(bool)
     volts_div_changed = pyqtSignal(float)
@@ -508,14 +509,21 @@ class ControlPanel(QWidget):
         self.btn_connect = QPushButton("\u26a1 Connect")
         self.btn_disconnect = QPushButton("\u26d4 Disconnect")
         self.btn_default = QPushButton("\u21bb Default")
+        self.btn_auto_setup = QPushButton("\u2699 Auto Setup")
+        self.btn_auto_setup.setStyleSheet(
+            "QPushButton { background-color: #1a2a4a; border-color: #2a4a7a; }"
+            "QPushButton:hover { background-color: #2a3a5a; }"
+        )
 
         self.btn_connect.clicked.connect(self.connect_clicked.emit)
         self.btn_disconnect.clicked.connect(self.disconnect_clicked.emit)
         self.btn_default.clicked.connect(self.default_setup_clicked.emit)
+        self.btn_auto_setup.clicked.connect(self.auto_setup_clicked.emit)
 
         l.addWidget(self.btn_connect)
         l.addWidget(self.btn_disconnect)
         l.addWidget(self.btn_default)
+        l.addWidget(self.btn_auto_setup)
         gb.setLayout(l)
         parent_layout.addWidget(gb)
 
@@ -860,6 +868,7 @@ class MainWindow(QMainWindow):
         self.control_panel.connect_clicked.connect(self.on_connect)
         self.control_panel.disconnect_clicked.connect(self.on_disconnect)
         self.control_panel.default_setup_clicked.connect(self.on_default_setup)
+        self.control_panel.auto_setup_clicked.connect(self.on_auto_setup)
 
         self.control_panel.acq_mode_changed.connect(self.on_acq_mode)
 
@@ -884,6 +893,7 @@ class MainWindow(QMainWindow):
         self.control_panel.btn_connect.setEnabled(not connected)
         self.control_panel.btn_disconnect.setEnabled(connected)
         self.control_panel.btn_default.setEnabled(connected)
+        self.control_panel.btn_auto_setup.setEnabled(connected)
         self.control_panel.btn_auto.setEnabled(connected)
         self.control_panel.btn_normal.setEnabled(connected)
         self.control_panel.btn_single.setEnabled(connected)
@@ -925,6 +935,102 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("Default setup applied")
         except Exception as e:
             self.on_error(f"Failed default setup: {e}")
+
+    def on_auto_setup(self):
+        """Analyze signal and auto-set gain, trigger, and timebase like a real scope."""
+        sc = self.scope_connection
+        if not sc.scope:
+            return
+
+        # Stop any running capture
+        self.on_acq_mode("hold")
+        self.status_bar.showMessage("Auto Setup: analyzing signal...")
+        QApplication.processEvents()
+
+        try:
+            self._auto_setup_iterate(sc)
+        except Exception as e:
+            self.on_error(f"Auto Setup failed: {e}")
+            return
+
+        self._pull_settings_to_ui()
+        self.update_status()
+        self.status_bar.showMessage("Auto Setup complete")
+        # Start continuous capture in auto mode
+        self.on_acq_mode("auto")
+        self.control_panel._set_acq_mode("auto")
+
+    def _auto_setup_iterate(self, sc, max_iterations=3):
+        """Iteratively adjust parameters to get a stable display."""
+        # Start with generous settings for initial capture
+        sc.apply_setting("gain.db", 0.0)
+        sc.apply_setting("adc.samples", 5000)
+        sc.apply_setting("adc.decimate", 0)
+        sc.apply_setting("adc.offset", 0)
+        sc.apply_setting("adc.timeout", 2.0)
+
+        for iteration in range(max_iterations):
+            # Capture a trace
+            sc.scope.arm()
+            timed_out = sc.scope.capture()
+            data = sc.scope.get_last_trace()
+
+            if data is None or len(data) < 10:
+                continue
+
+            vmin = float(np.min(data))
+            vmax = float(np.max(data))
+            vpp = vmax - vmin
+            vmid = (vmin + vmax) / 2.0
+
+            # -- Auto trigger: set to signal midpoint --
+            sc.apply_setting("trigger.level", vmid)
+
+            # -- Auto gain: target Vpp ~60-80% of full range (±0.5V = 1.0V) --
+            if vpp > 0.001:
+                target_vpp = 0.7  # 70% of 1.0V range
+                ratio = target_vpp / vpp
+                current_gain = sc.read_setting("gain.db") or 0.0
+                # gain in dB: 20*log10(ratio) adjustment
+                gain_adjust = 20 * np.log10(ratio)
+                new_gain = current_gain + gain_adjust
+
+                # Clamp to device range
+                if sc.is_husky:
+                    new_gain = max(-15.0, min(65.0, new_gain))
+                else:
+                    new_gain = max(-6.5, min(56.0, new_gain))
+
+                sc.apply_setting("gain.db", round(new_gain * 2) / 2)  # snap to 0.5 steps
+
+            # -- Auto timebase: detect frequency, show ~2-3 periods --
+            mean = np.mean(data)
+            diff_sign = np.diff(np.sign(data - mean))
+            crossings = np.where(diff_sign)[0]
+            rising = crossings[::2]
+
+            if len(rising) >= 2:
+                avg_period = float(np.mean(np.diff(rising)))
+                # Target: show ~3 periods
+                desired_samples = int(avg_period * 3)
+                desired_samples = max(100, min(131070 if sc.is_husky else 24400, desired_samples))
+                sc.apply_setting("adc.samples", desired_samples)
+
+                # Update view to match
+                self.waveform_plot.setXRange(0, desired_samples)
+            else:
+                # No periodic signal detected, just use current samples
+                pass
+
+            # -- Auto vertical scale: set Y range to fit signal --
+            if vpp > 0.001:
+                margin = vpp * 0.2
+                self.waveform_plot.setYRange(vmin - margin, vmax + margin)
+
+            # Show intermediate result
+            self.waveform_plot.update_trace(data)
+            self.waveform_plot.set_trigger_level(vmid)
+            QApplication.processEvents()
 
     def on_acq_mode(self, mode):
         if mode == "hold":

@@ -4,6 +4,8 @@ Oscilloscope GUI for ChipWhisperer devices (Husky and Lite). Provides real-time 
 
 ![Python](https://img.shields.io/badge/python-3.8+-blue)
 
+![CW-Scope Screenshot](screenshot.png)
+
 ## Features
 
 - **Real-time waveform display** with phosphor-green trace on dark background
